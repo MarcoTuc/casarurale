@@ -1,9 +1,5 @@
-// Incolla qui la configurazione del tuo progetto Firebase
-// (Console Firebase → Impostazioni progetto → Le tue app → Web → Config)
+// Configurazione Firebase (Realtime Database)
 window.FIREBASE_CONFIG = {
-  apiKey: "",
-  authDomain: "",
-  databaseURL: "",
-  projectId: "",
-  appId: ""
+  projectId: "casarurale-dafc9",
+  databaseURL: "https://casarurale-dafc9-default-rtdb.europe-west1.firebasedatabase.app"
 };
