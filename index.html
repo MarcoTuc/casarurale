@@ -25,6 +25,18 @@
   textarea { width:100%; min-height:65vh; padding:14px; border:1px solid var(--line); border-radius:10px;
     background:var(--card); color:var(--ink); font:15px/1.5 ui-monospace, Menlo, Consolas, monospace; resize:vertical; }
   textarea:focus { outline:2px solid var(--accent); outline-offset:-1px; }
+  .hint { color:var(--muted); font-size:.85rem; margin-bottom:10px; }
+  .list { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:10px 14px 16px; min-height:40vh; }
+  .row input { width:100%; border:none; border-bottom:1px solid transparent; background:none; color:var(--ink);
+    font:inherit; padding:6px 2px; min-width:0; }
+  .row input:focus { outline:none; border-bottom-color:var(--accent); }
+  .row.title input { font-size:1.15rem; font-weight:700; margin-top:8px; }
+  .row.item, .row.head { display:grid; grid-template-columns:1fr 90px 48px; gap:8px; align-items:center; }
+  .row.item { border-bottom:1px solid var(--line); }
+  .row.head { color:var(--muted); font-size:.75rem; text-transform:uppercase; letter-spacing:.04em; padding:4px 2px 0; }
+  .row.head span:last-child { text-align:center; }
+  .row.item input[type=checkbox] { width:20px; height:20px; justify-self:center; accent-color:var(--accent); cursor:pointer; }
+  .row.item.done input[data-f] { text-decoration:line-through; color:var(--muted); }
   .error { background:#fdecea; color:#8a1c12; padding:12px; border-radius:8px; }
 </style>
 </head>
@@ -49,6 +61,10 @@ let tabs = {};          // id -> {name, text, order}
 let current = null;
 let saveTimer = null;
 let dirty = false;
+let pendingSave = null;
+let listLines = null;   // SPESA: [{t:"h", name} | {t:"i", name, qty, done}]
+const LIST_TAB = "spesa";
+const TOOLS = `<div class="tools"><button onclick="renameTab()">rinomina</button><button onclick="deleteTab()">elimina tab</button></div>`;
 
 if (!window.FIREBASE_CONFIG || !FIREBASE_CONFIG.databaseURL) {
   mainEl.innerHTML = '<div class="error">Firebase non configurato: inserisci la configurazione in <code>config.js</code>.</div>';
@@ -76,8 +92,8 @@ if (!window.FIREBASE_CONFIG || !FIREBASE_CONFIG.databaseURL) {
     render();
   });
 
-  window.save = (id, text) => ref.child(id).update({ text })
-    .then(() => { dirty = false; statusEl.textContent = "Salvato ✓"; })
+  window.save = (id, data) => ref.child(id).update(data)
+    .then(() => { if (!pendingSave) { dirty = false; statusEl.textContent = "Salvato ✓"; } })
     .catch(e => statusEl.textContent = "Errore salvataggio: " + e.message);
 
   window.addTab = () => {
@@ -120,19 +136,15 @@ function render() {
   tabsEl.appendChild(add);
 
   if (!current) { mainEl.innerHTML = ""; return; }
+  if (current === LIST_TAB) return renderList();
 
   let ta = mainEl.querySelector("textarea");
   if (!ta || ta.dataset.id !== current) {
-    mainEl.innerHTML = `<div class="tools"><button onclick="renameTab()">rinomina</button><button onclick="deleteTab()">elimina tab</button></div>`;
+    mainEl.innerHTML = TOOLS;
     ta = document.createElement("textarea");
-    ta.dataset.id = current;
+    const id = ta.dataset.id = current;
     ta.placeholder = "Scrivi qui…";
-    ta.oninput = () => {
-      dirty = true;
-      statusEl.textContent = "Modifiche in corso…";
-      clearTimeout(saveTimer);
-      saveTimer = setTimeout(flush, 600);
-    };
+    ta.oninput = () => schedule(() => save(id, { text: ta.value }));
     ta.onblur = flush;
     mainEl.appendChild(ta);
     ta.value = tabs[current].text || "";
@@ -144,10 +156,146 @@ function render() {
   }
 }
 
+function schedule(fn) {
+  dirty = true;
+  pendingSave = fn;
+  statusEl.textContent = "Modifiche in corso…";
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(flush, 600);
+}
+
 function flush() {
   clearTimeout(saveTimer);
-  const ta = mainEl.querySelector("textarea");
-  if (ta && dirty && tabs[ta.dataset.id]) save(ta.dataset.id, ta.value);
+  if (!pendingSave) return;
+  const fn = pendingSave;
+  pendingSave = null;
+  fn();
+}
+
+// ---- SPESA: titles + item rows (name, quantity, bought) ----
+
+function getLines(t) {
+  let lines;
+  if (t.lines) {
+    lines = Object.values(t.lines).map(l => l.t === "i"
+      ? { t: "i", name: l.name || "", qty: l.qty || "", done: !!l.done }
+      : { t: "h", name: l.name || "" });
+  } else {
+    // Convert any plain text written before the list existed
+    lines = (t.text || "").split("\n").map(s => s.trim()).filter(Boolean).map(s =>
+      s.startsWith("-") ? { t: "i", name: s.slice(1).trim(), qty: "", done: false } : { t: "h", name: s });
+  }
+  return lines.length ? lines : [{ t: "h", name: "" }];
+}
+
+function renderList() {
+  let box = mainEl.querySelector(".list");
+  if (!box || box.dataset.id !== current) {
+    mainEl.innerHTML = TOOLS + `<div class="hint">Scrivi un titolo, oppure inizia la riga con <b>-</b> per aggiungere un articolo. Invio = nuova riga.</div>`;
+    box = document.createElement("div");
+    box.className = "list";
+    box.dataset.id = current;
+    mainEl.appendChild(box);
+    listLines = getLines(tabs[current]);
+    buildList();
+  } else if (!dirty) {
+    const fresh = getLines(tabs[current]);
+    if (JSON.stringify(fresh) !== JSON.stringify(listLines)) {
+      // Remote update: rebuild but keep whatever field the user is in
+      const a = document.activeElement;
+      const f = a && box.contains(a) && a.dataset.f ? [+a.dataset.i, a.dataset.f, a.selectionStart] : null;
+      listLines = fresh;
+      buildList();
+      if (f && f[0] < listLines.length) focusField(...f);
+    }
+  }
+}
+
+function listChanged() {
+  const id = current;
+  schedule(() => save(id, { lines: listLines }));
+}
+
+function buildList() {
+  const box = mainEl.querySelector(".list");
+  box.innerHTML = "";
+  listLines.forEach((l, i) => {
+    if (l.t === "i" && (i === 0 || listLines[i - 1].t !== "i")) {
+      box.insertAdjacentHTML("beforeend", `<div class="row head"><span>Articolo</span><span>Quantità</span><span>Preso</span></div>`);
+    }
+    const row = document.createElement("div");
+    if (l.t === "h") {
+      row.className = "row title";
+      row.append(listInput(i, "name", listLines.length === 1 ? "Titolo (es. Colazione)…" : "Titolo"));
+    } else {
+      row.className = "row item" + (l.done ? " done" : "");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = l.done;
+      cb.onchange = () => { l.done = cb.checked; row.classList.toggle("done", cb.checked); listChanged(); flush(); };
+      row.append(listInput(i, "name", "articolo"), listInput(i, "qty", "q.tà"), cb);
+    }
+    box.appendChild(row);
+  });
+}
+
+function listInput(i, f, placeholder) {
+  const inp = document.createElement("input");
+  inp.dataset.i = i;
+  inp.dataset.f = f;
+  inp.value = listLines[i][f];
+  inp.placeholder = placeholder;
+  inp.onblur = flush;
+  inp.oninput = () => {
+    const l = listLines[i];
+    if (l.t === "h" && inp.value.startsWith("-")) {
+      // "-" at the start of a title turns it into an item
+      listLines[i] = { t: "i", name: inp.value.slice(1).trimStart(), qty: "", done: false };
+      buildList();
+      focusField(i, "name");
+    } else {
+      l[f] = inp.value;
+    }
+    listChanged();
+  };
+  inp.onkeydown = e => {
+    const l = listLines[i];
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (l.t === "i" && !l.name && !l.qty) {
+        listLines[i] = { t: "h", name: "" };           // Enter on an empty item leaves the list
+      } else {
+        listLines.splice(i + 1, 0, l.t === "i" ? { t: "i", name: "", qty: "", done: false } : { t: "h", name: "" });
+        i++;
+      }
+      buildList();
+      focusField(i, "name");
+      listChanged();
+    } else if (e.key === "Backspace" && f === "name" && inp.selectionStart === 0 && inp.selectionEnd === 0) {
+      if (l.t === "i") {
+        e.preventDefault();
+        listLines[i] = { t: "h", name: l.name };       // back to a plain title
+        buildList();
+        focusField(i, "name", 0);
+        listChanged();
+      } else if (i > 0 && !l.name) {
+        e.preventDefault();
+        listLines.splice(i, 1);
+        buildList();
+        focusField(i - 1, "name");
+        listChanged();
+      }
+    }
+  };
+  return inp;
+}
+
+function focusField(i, f, pos) {
+  const inp = mainEl.querySelector(`.list input[data-i="${i}"][data-f="${f}"]`);
+  if (!inp) return;
+  inp.focus();
+  const p = pos ?? inp.value.length;
+  inp.setSelectionRange(p, p);
 }
 </script>
 </body>
