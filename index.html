@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Casa Rurale</title>
+<style>
+  :root { --bg:#f6f1e7; --card:#fffdf8; --ink:#2b2a26; --muted:#7a7466; --accent:#6b8f3c; --line:#e2d9c6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1d1c19; --card:#262521; --ink:#ece7dc; --muted:#a39d8e; --accent:#9cc267; --line:#3a3832; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family: system-ui, -apple-system, sans-serif; }
+  header { padding:20px 16px 8px; max-width:900px; margin:0 auto; }
+  h1 { margin:0; font-size:1.5rem; }
+  .status { color:var(--muted); font-size:.85rem; margin-top:4px; }
+  nav { display:flex; flex-wrap:wrap; gap:6px; padding:8px 16px; max-width:900px; margin:0 auto; }
+  nav button { border:1px solid var(--line); background:var(--card); color:var(--ink); padding:8px 14px;
+    border-radius:8px; font-weight:600; cursor:pointer; font-size:.95rem; }
+  nav button.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+  nav button.add { border-style:dashed; color:var(--muted); font-weight:500; }
+  main { max-width:900px; margin:0 auto; padding:8px 16px 32px; }
+  .tools { display:flex; justify-content:flex-end; gap:8px; margin-bottom:6px; }
+  .tools button { background:none; border:none; color:var(--muted); cursor:pointer; font-size:.85rem; text-decoration:underline; }
+  textarea { width:100%; min-height:65vh; padding:14px; border:1px solid var(--line); border-radius:10px;
+    background:var(--card); color:var(--ink); font:15px/1.5 ui-monospace, Menlo, Consolas, monospace; resize:vertical; }
+  textarea:focus { outline:2px solid var(--accent); outline-offset:-1px; }
+  .error { background:#fdecea; color:#8a1c12; padding:12px; border-radius:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🏡 Weekend in casa rurale</h1>
+  <div class="status" id="status">Connessione…</div>
+</header>
+<nav id="tabs"></nav>
+<main id="main"></main>
+
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="config.js"></script>
+<script>
+const DEFAULT_TABS = ["MACCHINE", "CIBO", "SPESA"];
+const statusEl = document.getElementById("status");
+const tabsEl = document.getElementById("tabs");
+const mainEl = document.getElementById("main");
+
+let tabs = {};          // id -> {name, text, order}
+let current = null;
+let saveTimer = null;
+let dirty = false;
+
+if (!window.FIREBASE_CONFIG || !FIREBASE_CONFIG.databaseURL) {
+  mainEl.innerHTML = '<div class="error">Firebase non configurato: inserisci la configurazione in <code>config.js</code>.</div>';
+  statusEl.textContent = "";
+} else {
+  firebase.initializeApp(FIREBASE_CONFIG);
+  const db = firebase.database();
+  const ref = db.ref("tabs");
+
+  db.ref(".info/connected").on("value", s => {
+    statusEl.textContent = s.val() ? "Online · le modifiche si salvano da sole" : "Offline · riconnessione…";
+  });
+
+  ref.on("value", snap => {
+    const data = snap.val();
+    if (!data) {
+      // Fixed keys so two people opening it at once don't create duplicates
+      const seed = {};
+      DEFAULT_TABS.forEach((name, i) => seed[name.toLowerCase()] = { name, text: "", order: i });
+      ref.update(seed);
+      return;
+    }
+    tabs = data;
+    if (!current || !tabs[current]) current = sortedIds()[0];
+    render();
+  });
+
+  window.save = (id, text) => ref.child(id).update({ text })
+    .then(() => { dirty = false; statusEl.textContent = "Salvato ✓"; })
+    .catch(e => statusEl.textContent = "Errore salvataggio: " + e.message);
+
+  window.addTab = () => {
+    const name = (prompt("Nome della nuova tab:") || "").trim();
+    if (!name) return;
+    const order = Math.max(-1, ...Object.values(tabs).map(t => t.order ?? 0)) + 1;
+    current = ref.push({ name: name.toUpperCase(), text: "", order }).key;
+  };
+
+  window.renameTab = () => {
+    const name = (prompt("Nuovo nome:", tabs[current].name) || "").trim();
+    if (name) ref.child(current).update({ name: name.toUpperCase() });
+  };
+
+  window.deleteTab = () => {
+    if (!confirm(`Eliminare la tab "${tabs[current].name}" e tutto il suo contenuto?`)) return;
+    const id = current;
+    current = null;
+    ref.child(id).remove();
+  };
+}
+
+function sortedIds() {
+  return Object.keys(tabs).sort((a, b) => (tabs[a].order ?? 0) - (tabs[b].order ?? 0));
+}
+
+function render() {
+  tabsEl.innerHTML = "";
+  sortedIds().forEach(id => {
+    const b = document.createElement("button");
+    b.textContent = tabs[id].name;
+    if (id === current) b.className = "active";
+    b.onclick = () => { flush(); current = id; render(); };
+    tabsEl.appendChild(b);
+  });
+  const add = document.createElement("button");
+  add.className = "add";
+  add.textContent = "+ crea tab";
+  add.onclick = addTab;
+  tabsEl.appendChild(add);
+
+  if (!current) { mainEl.innerHTML = ""; return; }
+
+  let ta = mainEl.querySelector("textarea");
+  if (!ta || ta.dataset.id !== current) {
+    mainEl.innerHTML = `<div class="tools"><button onclick="renameTab()">rinomina</button><button onclick="deleteTab()">elimina tab</button></div>`;
+    ta = document.createElement("textarea");
+    ta.dataset.id = current;
+    ta.placeholder = "Scrivi qui…";
+    ta.oninput = () => {
+      dirty = true;
+      statusEl.textContent = "Modifiche in corso…";
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(flush, 600);
+    };
+    ta.onblur = flush;
+    mainEl.appendChild(ta);
+    ta.value = tabs[current].text || "";
+  } else if (!dirty && ta.value !== (tabs[current].text || "")) {
+    // Remote update: apply it while keeping the cursor position
+    const { selectionStart: s, selectionEnd: e } = ta;
+    ta.value = tabs[current].text || "";
+    if (document.activeElement === ta) ta.setSelectionRange(s, e);
+  }
+}
+
+function flush() {
+  clearTimeout(saveTimer);
+  const ta = mainEl.querySelector("textarea");
+  if (ta && dirty && tabs[ta.dataset.id]) save(ta.dataset.id, ta.value);
+}
+</script>
+</body>
+</html>
